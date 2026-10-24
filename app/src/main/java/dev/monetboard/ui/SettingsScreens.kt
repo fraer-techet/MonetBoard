@@ -1,12 +1,39 @@
 package dev.monetboard.ui
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.view.inputmethod.InputMethodManager
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -45,6 +72,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,14 +82,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import dev.monetboard.ai.AiClient
+import dev.monetboard.ai.TrLangs
 import dev.monetboard.data.DEFAULT_SYSTEM_PROMPT
 import dev.monetboard.data.Prefs
 import kotlinx.coroutines.Dispatchers
@@ -71,7 +104,7 @@ import kotlin.math.roundToInt
 
 enum class Screen(val title: String) {
     HOME("Monet Board"), COLORS("Цвета и фон"), KEYBOARD("Раскладка и отклик"),
-    TEXT("Ввод текста"), AI("ИИ-агент"),
+    TEXT("Ввод текста"), TOOLS("Инструменты"), AI("ИИ-агент"),
 }
 
 fun isImeEnabled(ctx: Context): Boolean =
@@ -82,42 +115,82 @@ fun isImeSelected(ctx: Context): Boolean {
     return id.startsWith(ctx.packageName + "/")
 }
 
+private fun micGranted(ctx: Context) =
+    ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+// ------------------------------------------------------------------ shell
+
 @Composable
 fun SettingsApp(prefs: Prefs, tick: Int) {
     var screenName by rememberSaveable { mutableStateOf(Screen.HOME.name) }
     val screen = Screen.valueOf(screenName)
+    val anim = prefs.animations
     BackHandler(enabled = screen != Screen.HOME) { screenName = Screen.HOME.name }
     val cs = MaterialTheme.colorScheme
 
-    Column(Modifier.fillMaxSize().safeDrawingPadding()) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            if (screen != Screen.HOME) {
-                Box(
-                    Modifier.size(48.dp).clip(CircleShape).background(cs.primaryContainer)
-                        .clickable { screenName = Screen.HOME.name },
-                    contentAlignment = Alignment.Center,
-                ) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = cs.onPrimaryContainer) }
+    CompositionLocalProvider(LocalAnimations provides anim) {
+        Column(Modifier.fillMaxSize().safeDrawingPadding()) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AnimatedVisibility(
+                    visible = screen != Screen.HOME,
+                    enter = scaleIn(spring(0.6f, 400f)) + fadeIn() + expandHorizontally(),
+                    exit = scaleOut() + fadeOut() + shrinkHorizontally(),
+                ) {
+                    Box(
+                        Modifier.padding(end = 14.dp).size(48.dp).clip(CircleShape).background(cs.primaryContainer)
+                            .clickable { screenName = Screen.HOME.name },
+                        contentAlignment = Alignment.Center,
+                    ) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = cs.onPrimaryContainer) }
+                }
+                AnimatedContent(
+                    targetState = screen.title,
+                    transitionSpec = {
+                        if (!anim) ContentTransform(EnterTransition.None, ExitTransition.None)
+                        else (slideInVertically(tween(260)) { it / 2 } + fadeIn(tween(220))) togetherWith
+                            (slideOutVertically(tween(200)) { -it / 2 } + fadeOut(tween(120)))
+                    },
+                    label = "title",
+                ) { title ->
+                    Text(title, fontSize = 30.sp, fontWeight = FontWeight.Bold, color = cs.onBackground)
+                }
             }
-            Text(screen.title, fontSize = 30.sp, fontWeight = FontWeight.Bold, color = cs.onBackground)
-        }
-        TestField()
-        Column(
-            Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            when (screen) {
-                Screen.HOME -> HomePage(tick) { screenName = it.name }
-                Screen.COLORS -> ColorsPage(prefs)
-                Screen.KEYBOARD -> KeyboardPage(prefs)
-                Screen.TEXT -> TextPage(prefs)
-                Screen.AI -> AiPage(prefs)
+            TestField()
+            AnimatedContent(
+                targetState = screen,
+                transitionSpec = {
+                    if (!anim) ContentTransform(EnterTransition.None, ExitTransition.None)
+                    else if (targetState != Screen.HOME)
+                        (slideInHorizontally(tween(340, easing = FastOutSlowInEasing)) { it / 3 } + fadeIn(tween(260))) togetherWith
+                            (slideOutHorizontally(tween(260)) { -it / 5 } + fadeOut(tween(160)))
+                    else
+                        (slideInHorizontally(tween(340, easing = FastOutSlowInEasing)) { -it / 3 } + fadeIn(tween(260))) togetherWith
+                            (slideOutHorizontally(tween(260)) { it / 5 } + fadeOut(tween(160)))
+                },
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                label = "page",
+            ) { s ->
+                val rc = remember { RevealCounter() }
+                CompositionLocalProvider(LocalReveal provides rc) {
+                    Column(
+                        Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        when (s) {
+                            Screen.HOME -> HomePage(tick) { screenName = it.name }
+                            Screen.COLORS -> ColorsPage(prefs)
+                            Screen.KEYBOARD -> KeyboardPage(prefs)
+                            Screen.TEXT -> TextPage(prefs)
+                            Screen.TOOLS -> ToolsPage(prefs, tick)
+                            Screen.AI -> AiPage(prefs)
+                        }
+                        Spacer(Modifier.height(24.dp))
+                    }
+                }
             }
-            Spacer(Modifier.height(24.dp))
         }
     }
 }
@@ -145,11 +218,11 @@ private fun HomePage(tick: Int, go: (Screen) -> Unit) {
 
     if (enabled && selected) {
         Row(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(cs.primaryContainer).padding(18.dp),
+            Modifier.reveal().fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(cs.primaryContainer).padding(18.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            CookieButton(Icons.Default.Check, cs.primary, cs.onPrimary, size = 56.dp) {}
+            SpinCookie(Icons.Default.Check)
             Column {
                 Text("Всё готово", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = cs.onPrimaryContainer)
                 Text("Клавиатура включена и выбрана", color = cs.onPrimaryContainer)
@@ -157,7 +230,7 @@ private fun HomePage(tick: Int, go: (Screen) -> Unit) {
         }
     } else {
         Column(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(cs.surfaceContainer).padding(18.dp),
+            Modifier.reveal().fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(cs.surfaceContainer).padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text("Подключение клавиатуры", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = cs.onSurface)
@@ -171,9 +244,22 @@ private fun HomePage(tick: Int, go: (Screen) -> Unit) {
     }
 
     NavCard(Icons.Default.Star, "Цвета и фон", "Monet, акцент, AMOLED, тема") { go(Screen.COLORS) }
-    NavCard(Icons.Default.Menu, "Раскладка и отклик", "Размер клавиш, форма, вибрация, ряд цифр") { go(Screen.KEYBOARD) }
+    NavCard(Icons.Default.Menu, "Раскладка и отклик", "Размер клавиш, форма, вибрация, анимации") { go(Screen.KEYBOARD) }
     NavCard(Icons.Default.Edit, "Ввод текста", "Автоисправление, подсказки, знаки, заглавные") { go(Screen.TEXT) }
-    NavCard(KbIcons.Spark, "ИИ-агент", "Ключ, модель, провайдер, промпт") { go(Screen.AI) }
+    NavCard(Icons.Default.Notifications, "Инструменты", "Переводчик, голос, буфер обмена") { go(Screen.TOOLS) }
+    NavCard(dev.monetboard.ui.KbIcons.Spark, "ИИ-агент", "Ключ, модель, провайдер, промпт") { go(Screen.AI) }
+}
+
+@Composable
+private fun SpinCookie(icon: ImageVector) {
+    val cs = MaterialTheme.colorScheme
+    val rot by rememberInfiniteTransition(label = "spin").animateFloat(
+        0f, 360f, infiniteRepeatable(tween(14000, easing = LinearEasing)), label = "rot",
+    )
+    Box(Modifier.size(56.dp), contentAlignment = Alignment.Center) {
+        Box(Modifier.fillMaxSize().graphicsLayer { rotationZ = rot }.clip(CookieShape).background(cs.primary))
+        Icon(icon, null, tint = cs.onPrimary, modifier = Modifier.size(28.dp))
+    }
 }
 
 @Composable
@@ -204,13 +290,17 @@ private fun ColorsPage(p: Prefs) {
 
     if (!monetOk || p.colorSource == 1) {
         SectionLabel("Акцент")
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(Modifier.reveal().fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Accents.forEachIndexed { i, a ->
-                Box(
-                    Modifier.weight(1f).aspectRatio(1f).clip(CircleShape).background(accentSwatch(a.hue))
-                        .clickable { p.accent = i },
-                    contentAlignment = Alignment.Center,
-                ) { if (p.accent == i) Icon(Icons.Default.Check, null, tint = androidx.compose.ui.graphics.Color.Black.copy(alpha = .7f)) }
+                val sel = p.accent == i
+                val pad by animateDpAsState(if (sel) 0.dp else 5.dp, spring(0.55f, 420f), label = "acc$i")
+                Box(Modifier.weight(1f).aspectRatio(1f), contentAlignment = Alignment.Center) {
+                    Box(
+                        Modifier.fillMaxSize().padding(pad).clip(CircleShape).background(accentSwatch(a.hue))
+                            .clickable { p.accent = i },
+                        contentAlignment = Alignment.Center,
+                    ) { if (sel) Icon(Icons.Default.Check, null, tint = Color.Black.copy(alpha = .7f)) }
+                }
             }
         }
     }
@@ -223,6 +313,7 @@ private fun ColorsPage(p: Prefs) {
 
 @Composable
 private fun KeyboardPage(p: Prefs) {
+    SwitchRow(Icons.Default.Star, "Анимации", "Переходы, пружинки, волны. Выключи на слабом телефоне", p.animations) { p.animations = it }
     SliderRow("Высота клавиш", p.keyHeight, 40, 64, 1, "dp") { p.keyHeight = it }
     SliderRow("Расстояние между клавишами", p.keyGap, 2, 8, 1, "dp") { p.keyGap = it }
     SliderRow("Скругление клавиш", p.keyRadius, 6, 28, 1, "dp") { p.keyRadius = it }
@@ -237,7 +328,7 @@ private fun KeyboardPage(p: Prefs) {
 private fun TextPage(p: Prefs) {
     SwitchRow(Icons.Default.Check, "Автоисправление", "Исправляет опечатки по пробелу, только если слова нет в словаре. ⌫ сразу после — отмена, и слово запоминается", p.autocorrect) { p.autocorrect = it }
     Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(MaterialTheme.colorScheme.surfaceContainer).padding(16.dp),
+        Modifier.reveal().fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(MaterialTheme.colorScheme.surfaceContainer).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Text("Насколько смело исправлять", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
@@ -256,16 +347,62 @@ private fun TextPage(p: Prefs) {
 }
 
 @Composable
+private fun ToolsPage(p: Prefs, tick: Int) {
+    val ctx = LocalContext.current
+    val cs = MaterialTheme.colorScheme
+    val mic = remember(tick) { micGranted(ctx) }
+
+    SectionLabel("Переводчик")
+    SegmentedRow(listOf("Google", "Яндекс"), p.trProvider) { p.trProvider = it }
+    Text(
+        if (p.trProvider == 0) "Google: без ключа, через открытый endpoint translate.googleapis.com. Неофициальный, при частых запросах может притормозить."
+        else "Яндекс: официальный Yandex Cloud Translate. Нужен API-ключ сервисного аккаунта (роль ai.translate.user) и Folder ID.",
+        color = cs.onSurfaceVariant, fontSize = 13.sp, modifier = Modifier.reveal().padding(horizontal = 8.dp),
+    )
+    if (p.trProvider == 1) {
+        FieldRow("Yandex API-ключ", p.yandexKey, KeyboardType.Password, secret = true) { p.yandexKey = it }
+        FieldRow("Folder ID", p.yandexFolder, KeyboardType.Ascii) { p.yandexFolder = it }
+    }
+    SectionLabel("Язык перевода по умолчанию")
+    Row(Modifier.reveal().fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        TrLangs.forEachIndexed { i, l ->
+            val on = p.trTarget == i
+            PillButton(l.name, if (on) cs.primary else cs.secondaryContainer, if (on) cs.onPrimary else cs.onSecondaryContainer, height = 40.dp) {
+                p.trTarget = i
+            }
+        }
+    }
+
+    SectionLabel("Голосовой ввод")
+    SwitchRow(Icons.Default.Notifications, "Непрерывная диктовка", "После фразы микрофон слушает дальше, пока не нажмёшь стоп", p.voiceContinuous) { p.voiceContinuous = it }
+    if (mic) {
+        NavCard(Icons.Default.Check, "Микрофон разрешён", "Можно диктовать из клавиатуры") {}
+    } else {
+        NavCard(Icons.Default.Info, "Дать доступ к микрофону", "Нужен для голосового ввода") {
+            ctx.startActivity(Intent(ctx, PermissionActivity::class.java))
+        }
+        NavCard(Icons.Default.Settings, "Настройки приложения", "Если окно разрешения не появляется") {
+            ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${ctx.packageName}")))
+        }
+    }
+
+    SectionLabel("Буфер обмена")
+    SwitchRow(Icons.Default.Edit, "История буфера", "Запоминает скопированный текст (пароли из менеджеров не сохраняются)", p.clipEnabled) { p.clipEnabled = it }
+    SliderRow("Сколько хранить", p.clipMax, 10, 60, 5, "шт") { p.clipMax = it }
+    NavCard(Icons.Default.Delete, "Очистить историю", "Удалит всё, включая закреплённое") { p.clipsJson = "[]" }
+}
+
+@Composable
 private fun AiPage(p: Prefs) {
     val cs = MaterialTheme.colorScheme
     val scope = rememberCoroutineScope()
     var status by remember { mutableStateOf<String?>(null) }
     var testing by remember { mutableStateOf(false) }
 
-    SwitchRow(KbIcons.Spark, "ИИ в клавиатуре", "Кнопка ✦ слева от подсказок", p.aiEnabled) { p.aiEnabled = it }
+    SwitchRow(dev.monetboard.ui.KbIcons.Spark, "ИИ в клавиатуре", "Меню ✦ → «Исправить» и «ИИ-режим»", p.aiEnabled) { p.aiEnabled = it }
 
     SectionLabel("Провайдер (любой OpenAI-совместимый)")
-    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    Row(Modifier.reveal().fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         listOf(
             Triple("OpenAI", "https://api.openai.com/v1", "gpt-4o-mini"),
             Triple("OpenRouter", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini"),
@@ -283,11 +420,11 @@ private fun AiPage(p: Prefs) {
     FieldRow("API-ключ", p.aiApiKey, KeyboardType.Password, secret = true) { p.aiApiKey = it }
     FieldRow("Модель", p.aiModel, KeyboardType.Ascii) { p.aiModel = it }
 
-    SectionLabel("Перевод: на какой язык")
+    SectionLabel("ИИ-перевод: на какой язык")
     SegmentedRow(listOf("Авто", "Русский", "English"), p.aiTarget) { p.aiTarget = it }
 
     Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(cs.surfaceContainer).padding(16.dp),
+        Modifier.reveal().fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(cs.surfaceContainer).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Text("Температура: ${"%.1f".format(p.aiTemperature)}", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
@@ -299,11 +436,11 @@ private fun AiPage(p: Prefs) {
     }
 
     FieldRow("Системный промпт", p.aiSystemPrompt, KeyboardType.Text, singleLine = false) { p.aiSystemPrompt = it }
-    PillButton("Вернуть промпт по умолчанию", cs.secondaryContainer, cs.onSecondaryContainer, height = 44.dp) {
+    PillButton("Вернуть промпт по умолчанию", cs.secondaryContainer, cs.onSecondaryContainer, Modifier.reveal(), height = 44.dp) {
         p.aiSystemPrompt = DEFAULT_SYSTEM_PROMPT
     }
 
-    PillButton(if (testing) "Проверяю…" else "Проверить соединение", cs.primary, cs.onPrimary, Modifier.fillMaxWidth(), height = 52.dp) {
+    PillButton(if (testing) "Проверяю…" else "Проверить соединение", cs.primary, cs.onPrimary, Modifier.reveal().fillMaxWidth(), height = 52.dp) {
         if (testing) return@PillButton
         testing = true; status = null
         val cfg = p.aiConfig()
@@ -315,14 +452,20 @@ private fun AiPage(p: Prefs) {
             status = r.fold({ "Работает: ${it.take(60)}" }, { "Ошибка: ${it.message}" })
         }
     }
-    status?.let { Text(it, color = if (it.startsWith("Ошибка")) cs.error else cs.primary, fontSize = 14.sp) }
+    AnimatedVisibility(visible = status != null, enter = fadeIn() + slideInVertically { it / 2 }) {
+        val s = status.orEmpty()
+        Text(s, color = if (s.startsWith("Ошибка")) cs.error else cs.primary, fontSize = 14.sp)
+    }
 }
 
 // ------------------------------------------------------------------ building blocks
 
 @Composable
 private fun SectionLabel(text: String) {
-    Text(text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(start = 8.dp, top = 10.dp))
+    Text(
+        text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.reveal().padding(start = 8.dp, top = 10.dp),
+    )
 }
 
 @Composable
@@ -336,16 +479,17 @@ private fun IconCookie(icon: ImageVector) {
 @Composable
 private fun NavCard(icon: ImageVector, title: String, subtitle: String, onClick: () -> Unit) {
     val cs = MaterialTheme.colorScheme
-    Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(cs.surfaceContainer)
-            .clickable(onClick = onClick).padding(16.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        IconCookie(icon)
-        Column(Modifier.weight(1f)) {
-            Text(title, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = cs.onSurface)
-            Text(subtitle, fontSize = 14.sp, color = cs.onSurfaceVariant)
+    TapTile(Modifier.reveal().fillMaxWidth(), cs.surfaceContainer, 24.dp, onClick) {
+        Row(
+            Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            IconCookie(icon)
+            Column(Modifier.weight(1f)) {
+                Text(title, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = cs.onSurface)
+                Text(subtitle, fontSize = 14.sp, color = cs.onSurfaceVariant)
+            }
         }
     }
 }
@@ -353,18 +497,19 @@ private fun NavCard(icon: ImageVector, title: String, subtitle: String, onClick:
 @Composable
 private fun SwitchRow(icon: ImageVector, title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) {
     val cs = MaterialTheme.colorScheme
-    Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(cs.surfaceContainer)
-            .clickable { onChange(!checked) }.padding(16.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        IconCookie(icon)
-        Column(Modifier.weight(1f)) {
-            Text(title, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = cs.onSurface)
-            Text(subtitle, fontSize = 14.sp, color = cs.onSurfaceVariant)
+    TapTile(Modifier.reveal().fillMaxWidth(), cs.surfaceContainer, 24.dp, { onChange(!checked) }) {
+        Row(
+            Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            IconCookie(icon)
+            Column(Modifier.weight(1f)) {
+                Text(title, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = cs.onSurface)
+                Text(subtitle, fontSize = 14.sp, color = cs.onSurfaceVariant)
+            }
+            Switch(checked = checked, onCheckedChange = onChange)
         }
-        Switch(checked = checked, onCheckedChange = onChange)
     }
 }
 
@@ -372,7 +517,7 @@ private fun SwitchRow(icon: ImageVector, title: String, subtitle: String, checke
 private fun SliderRow(title: String, value: Int, min: Int, max: Int, step: Int, unit: String, onChange: (Int) -> Unit) {
     val cs = MaterialTheme.colorScheme
     Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(cs.surfaceContainer).padding(16.dp),
+        Modifier.reveal().fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(cs.surfaceContainer).padding(16.dp),
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(title, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = cs.onSurface)
@@ -390,10 +535,10 @@ private fun SliderRow(title: String, value: Int, min: Int, max: Int, step: Int, 
 @Composable
 private fun SegmentedRow(options: List<String>, selected: Int, enabled: Boolean = true, onSelect: (Int) -> Unit) {
     val cs = MaterialTheme.colorScheme
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    Row(Modifier.reveal().fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         options.forEachIndexed { i, o ->
             val sel = i == selected
-            val r by animateDpAsState(if (sel) 26.dp else 14.dp, label = "seg")
+            val r by animateDpAsState(if (sel) 26.dp else 14.dp, spring(0.6f, 420f), label = "seg")
             Box(
                 Modifier.weight(1f).height(52.dp).clip(RoundedCornerShape(r))
                     .background(if (sel) cs.primary else cs.secondaryContainer)
@@ -415,20 +560,24 @@ private fun FieldRow(label: String, value: String, type: KeyboardType, secret: B
         value = value, onValueChange = onChange,
         label = { Text(label) },
         singleLine = singleLine,
-        visualTransformation = if (secret) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
+        visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
         keyboardOptions = KeyboardOptions(keyboardType = type),
         shape = RoundedCornerShape(20.dp),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.reveal().fillMaxWidth(),
     )
 }
 
-/** Static mock of the live keyboard so theme/radius changes are visible without leaving the page. */
+/** Mock of the live keyboard with a looping "typing" animation so theme/radius changes are visible right here. */
 @Composable
 private fun KeyboardPreview(p: Prefs) {
     val cs = MaterialTheme.colorScheme
     val r = p.keyRadius.dp
+    val pos by rememberInfiniteTransition(label = "typing").animateFloat(
+        0f, 6f, infiniteRepeatable(tween(4800, easing = LinearEasing), RepeatMode.Restart), label = "pos",
+    )
+    val active = pos.toInt().coerceIn(0, 5)
     Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(cs.surfaceContainer).padding(10.dp),
+        Modifier.reveal().fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(cs.surfaceContainer).padding(10.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -436,13 +585,14 @@ private fun KeyboardPreview(p: Prefs) {
             PillButton("как", cs.secondaryContainer, cs.onSecondaryContainer, Modifier.weight(1f)) {}
             PillButton("привет", cs.primary, cs.onPrimary, Modifier.weight(1f)) {}
             PillButton("дела", cs.secondaryContainer, cs.onSecondaryContainer, Modifier.weight(1f)) {}
-            CookieButton(Icons.Default.Settings, cs.primary, cs.onPrimary) {}
+            CookieButton(KbIcons.Mic, cs.primary, cs.onPrimary) {}
         }
         Row(horizontalArrangement = Arrangement.spacedBy(p.keyGap.dp)) {
-            "п р и в е т".split(" ").forEach { ch ->
-                val hi = ch == "и"
+            "п р и в е т".split(" ").forEachIndexed { i, ch ->
+                val hi = i == active
+                val rad by animateDpAsState(if (hi) r + 12.dp else r, spring(0.5f, 500f), label = "pk$i")
                 Box(
-                    Modifier.weight(1f).height(p.keyHeight.dp).clip(RoundedCornerShape(if (hi) r + 12.dp else r))
+                    Modifier.weight(1f).height(p.keyHeight.dp).clip(RoundedCornerShape(rad))
                         .background(if (hi) cs.primaryContainer else cs.secondaryContainer),
                     contentAlignment = Alignment.Center,
                 ) { Text(ch, fontSize = 22.sp, fontWeight = FontWeight.Medium, color = if (hi) cs.onPrimaryContainer else cs.onSecondaryContainer) }
@@ -453,7 +603,16 @@ private fun KeyboardPreview(p: Prefs) {
                 Icon(KbIcons.Shift, null, tint = cs.onPrimary, modifier = Modifier.size(24.dp))
             }
             Box(Modifier.weight(3f).height(p.keyHeight.dp).clip(RoundedCornerShape(r)).background(cs.surfaceContainerHighest), contentAlignment = Alignment.Center) {
-                Text("Русский", color = cs.onSurfaceVariant, fontSize = 14.sp)
+                Row(
+                    Modifier.height(32.dp).clip(RoundedCornerShape(16.dp)).background(cs.surfaceContainer),
+                ) {
+                    Box(Modifier.size(44.dp, 32.dp).clip(RoundedCornerShape(16.dp)).background(cs.primary), contentAlignment = Alignment.Center) {
+                        Text("RU", color = cs.onPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                    Box(Modifier.size(44.dp, 32.dp), contentAlignment = Alignment.Center) {
+                        Text("EN", color = cs.onSurfaceVariant, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
             }
             Box(Modifier.weight(1f).height(p.keyHeight.dp).clip(RoundedCornerShape(r)).background(cs.tertiaryContainer), contentAlignment = Alignment.Center) {
                 Icon(KbIcons.Backspace, null, tint = cs.onTertiaryContainer, modifier = Modifier.size(24.dp))

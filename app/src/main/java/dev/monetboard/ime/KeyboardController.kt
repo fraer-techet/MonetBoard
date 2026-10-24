@@ -13,6 +13,7 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import dev.monetboard.data.Prefs
 import dev.monetboard.ui.MainActivity
+import dev.monetboard.ui.PermissionActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -20,10 +21,13 @@ import kotlinx.coroutines.cancel
 
 class Source(val text: String, val selection: Boolean, val before: Int, val after: Int)
 
-/** All typing logic. UI only calls into this; state lives in [state] / [ai] (Compose snapshot state). */
-class KeyboardController(private val service: InputMethodService, val prefs: Prefs) {
+/** All typing logic. UI only calls into this; state lives in [state] / [ai] / [translator] (Compose snapshot state). */
+class KeyboardController(val service: InputMethodService, val prefs: Prefs) {
     val state = KeyboardState(prefs)
     val ai = AiAgent(this)
+    val translator = TranslatorAgent(this)
+    val clipboard = ClipboardStore(service.applicationContext, prefs)
+    val voice = VoiceInput(service, this)
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val dict = Dictionaries(service.applicationContext, prefs).also { it.preload() }
 
@@ -51,6 +55,14 @@ class KeyboardController(private val service: InputMethodService, val prefs: Pre
         InputType.TYPE_TEXT_VARIATION_WEB_EMAIL_ADDRESS,
         InputType.TYPE_TEXT_VARIATION_URI,
     )
+
+    /** Keys feed an in-keyboard text line (AI prompt / translator input) instead of the host field. */
+    private val bufferActive: Boolean get() = ai.open || state.panel == Panel.TRANSLATE
+    private var buffer: String
+        get() = if (ai.open) ai.prompt else translator.input
+        set(v) { if (ai.open) ai.prompt = v else translator.input = v }
+
+    init { clipboard.start() }
 
     // ---------------------------------------------------------------- lifecycle
 
@@ -84,21 +96,68 @@ class KeyboardController(private val service: InputMethodService, val prefs: Pre
             autoShift = false
             state.altKeys = emptyList()
             lastCorrection = null
-            ai.close()
+            resetPanels()
         }
         afterEdit()
     }
 
-    fun onFinish() { ai.close() }
-    fun destroy() { scope.cancel() }
+    private fun resetPanels() {
+        voice.stop()
+        translator.close()
+        ai.close()
+        state.panel = Panel.KEYS
+    }
+
+    fun onFinish() { resetPanels() }
+
+    fun destroy() {
+        voice.stop()
+        clipboard.stop()
+        scope.cancel()
+    }
+
     fun onSelectionChanged() { afterEdit() }
+
+    // ---------------------------------------------------------------- panels
+
+    fun openPanel(p: Panel) {
+        if (state.panel == Panel.VOICE && p != Panel.VOICE) voice.stop()
+        if (ai.open) ai.close()
+        if (p != Panel.TRANSLATE) translator.close()
+        state.altKeys = emptyList()
+        state.panel = p
+        when (p) {
+            Panel.VOICE -> voice.start()
+            Panel.CLIP -> clipboard.refresh()
+            Panel.KEYS -> afterEdit()
+            else -> {}
+        }
+    }
+
+    /** The round "X" on the left: closes AI first, otherwise returns to the keys. */
+    fun closeAny() { if (ai.open) ai.close() else openPanel(Panel.KEYS) }
+
+    fun openAi() {
+        openPanel(Panel.KEYS)
+        if (ai.allowed) ai.open = true
+    }
+
+    /** One tap: AI-fix the text that's already in the field (or the selection), result shown as a card. */
+    fun openAiFix() {
+        openPanel(Panel.KEYS)
+        if (!ai.allowed) return
+        ai.open = true
+        ai.runAction(AiAction.FIX)
+    }
+
+    fun toggleMic() { openPanel(if (state.panel == Panel.VOICE) Panel.KEYS else Panel.VOICE) }
 
     // ---------------------------------------------------------------- typing
 
     fun onChar(raw: String) {
         val s = if (state.page == Page.LETTERS && state.shift != Shift.OFF) raw.uppercase() else raw
         state.altKeys = emptyList()
-        if (ai.open) { ai.prompt += s; consumeShift(); return }
+        if (bufferActive) { buffer += s; consumeShift(); return }
         val ic = ic ?: return
         lastSpaceAt = 0
         lastCorrection = null
@@ -107,13 +166,31 @@ class KeyboardController(private val service: InputMethodService, val prefs: Pre
         afterEdit()
     }
 
-    /** Raw insert (emoji): no autocorrect, no shift handling. */
+    /** Raw insert (emoji, clipboard item): no autocorrect, no shift handling. */
     fun typeRaw(s: String) {
         state.altKeys = emptyList()
-        if (ai.open) { ai.prompt += s; return }
+        if (bufferActive) { buffer += s; return }
         lastCorrection = null
         ic?.commitText(s, 1)
         afterEdit()
+    }
+
+    fun insertClip(text: String) {
+        typeRaw(text)
+        openPanel(Panel.KEYS)
+    }
+
+    fun commitVoice(t: String) {
+        if (bufferActive) {
+            val b = buffer
+            buffer = b + (if (b.isNotEmpty() && !b.endsWith(" ")) " " else "") + t
+            return
+        }
+        val ic = ic ?: return
+        val before = ic.getTextBeforeCursor(1, 0)?.toString().orEmpty()
+        val lead = if (before.isNotEmpty() && !before.last().isWhitespace()) " " else ""
+        lastCorrection = null
+        ic.commitText("$lead$t ", 1)
     }
 
     private fun punct(ic: InputConnection, p: String) {
@@ -148,7 +225,7 @@ class KeyboardController(private val service: InputMethodService, val prefs: Pre
 
     fun onSpace() {
         state.altKeys = emptyList()
-        if (ai.open) { ai.prompt += " "; return }
+        if (bufferActive) { buffer += " "; return }
         val ic = ic ?: return
         lastCorrection = null
         val now = SystemClock.uptimeMillis()
@@ -168,9 +245,9 @@ class KeyboardController(private val service: InputMethodService, val prefs: Pre
 
     fun onBackspace(repeat: Boolean = false) {
         state.altKeys = emptyList()
-        if (ai.open) {
-            val p = ai.prompt
-            if (p.isNotEmpty()) ai.prompt = p.dropLast(if (p.length >= 2 && Character.isLowSurrogate(p.last())) 2 else 1)
+        if (bufferActive) {
+            val p = buffer
+            if (p.isNotEmpty()) buffer = p.dropLast(if (p.length >= 2 && Character.isLowSurrogate(p.last())) 2 else 1)
             return
         }
         val ic = ic ?: return
@@ -195,6 +272,7 @@ class KeyboardController(private val service: InputMethodService, val prefs: Pre
     fun onEnter() {
         state.altKeys = emptyList()
         if (ai.open) { ai.send(); return }
+        if (state.panel == Panel.TRANSLATE) { translator.run(); return }
         val ic = ic ?: return
         val ei = info ?: return
         lastCorrection = null
@@ -206,7 +284,7 @@ class KeyboardController(private val service: InputMethodService, val prefs: Pre
     }
 
     fun onSuggestion(s: String) {
-        if (ai.open) return
+        if (bufferActive) return
         val ic = ic ?: return
         val w = currentWord(ic.getTextBeforeCursor(48, 0) ?: "")
         ic.beginBatchEdit()
@@ -230,7 +308,7 @@ class KeyboardController(private val service: InputMethodService, val prefs: Pre
     }
 
     private fun replaceLast(s: String) {
-        if (ai.open) { ai.prompt = ai.prompt.dropLast(1) + s; return }
+        if (bufferActive) { buffer = buffer.dropLast(1) + s; return }
         val ic = ic ?: return
         ic.beginBatchEdit(); ic.deleteSurroundingText(1, 0); ic.commitText(s, 1); ic.endBatchEdit()
         lastCorrection = null
@@ -238,7 +316,7 @@ class KeyboardController(private val service: InputMethodService, val prefs: Pre
     }
 
     fun moveCursor(dir: Int) {
-        if (ai.open) return
+        if (bufferActive) return
         service.sendDownUpKeyEvents(if (dir < 0) KeyEvent.KEYCODE_DPAD_LEFT else KeyEvent.KEYCODE_DPAD_RIGHT)
         afterEdit()
     }
@@ -267,16 +345,18 @@ class KeyboardController(private val service: InputMethodService, val prefs: Pre
         state.altKeys = emptyList()
     }
 
-    fun nextLang() {
-        state.langIndex = (state.langIndex + 1) % Layouts.langs.size
-        prefs.lastLang = state.langIndex
+    fun setLang(i: Int) {
+        val n = i.coerceIn(0, Layouts.langs.lastIndex)
+        if (n == state.langIndex) return
+        state.langIndex = n
+        prefs.lastLang = n
         afterEdit()
     }
 
     // ---------------------------------------------------------------- state refresh
 
     fun afterEdit() {
-        if (ai.open) return
+        if (bufferActive) return
         val ic = ic ?: return
         val ei = info ?: return
         if (prefs.autoCap && state.page == Page.LETTERS && state.shift != Shift.CAPS) {
@@ -300,7 +380,7 @@ class KeyboardController(private val service: InputMethodService, val prefs: Pre
         return before.subSequence(i, before.length).toString().trimStart('\'', '’')
     }
 
-    // ---------------------------------------------------------------- field IO for AI
+    // ---------------------------------------------------------------- field IO (AI / translator)
 
     fun readSource(): Source {
         val ic = ic ?: return Source("", false, 0, 0)
@@ -334,9 +414,11 @@ class KeyboardController(private val service: InputMethodService, val prefs: Pre
         if (prefs.sound) audio.playSoundEffect(AudioManager.FX_KEYPRESS_STANDARD, 0.5f)
     }
 
-    fun toggleAi() = ai.toggle()
-
     fun openSettings() {
         service.startActivity(Intent(service, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+
+    fun openPermission() {
+        service.startActivity(Intent(service, PermissionActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 }

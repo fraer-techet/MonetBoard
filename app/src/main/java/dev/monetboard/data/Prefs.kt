@@ -80,6 +80,23 @@ class Prefs private constructor(ctx: Context) {
     var aiTarget by int("aiTarget", 0)             // translate target: 0 auto, 1 ru, 2 en
     var aiSystemPrompt by str("aiSystemPrompt", DEFAULT_SYSTEM_PROMPT)
 
+    // --- animations
+    var animations by bool("animations", true)
+
+    // --- translator (0 Google, 1 Yandex Cloud)
+    var trProvider by int("trProvider", 0)
+    var yandexKey by str("yandexKey", "")
+    var yandexFolder by str("yandexFolder", "")
+    var trTarget by int("trTarget", 0)             // index into TrLangs, 0 = auto
+
+    // --- voice
+    var voiceContinuous by bool("voiceContinuous", true)
+
+    // --- clipboard history
+    var clipEnabled by bool("clipEnabled", true)
+    var clipMax by int("clipMax", 30)
+    var clipsJson by str("clipsJson", "[]")
+
     fun aiConfig() = AiConfig(aiBaseUrl, aiApiKey, aiModel, aiTemperature, aiSystemPrompt)
 
     // --- learned words (autocorrect undo / manual)

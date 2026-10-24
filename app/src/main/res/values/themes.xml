@@ -1,3 +1,4 @@
 <resources>
     <style name="Theme.MonetBoard" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.MonetBoard.Transparent" parent="android:Theme.Translucent.NoTitleBar" />
 </resources>

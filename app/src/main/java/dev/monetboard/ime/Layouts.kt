@@ -9,7 +9,7 @@ data class KeyDef(
     val alts: String = "",
 )
 
-class Lang(val code: String, val name: String, val rows: List<String>, val alts: Map<Char, String>)
+class Lang(val code: String, val name: String, val rows: List<String>, val alts: Map<Char, String>, val tag: String)
 
 /** Add a language: append a Lang here + drop assets/dict/<code>.txt (+ a subtype in res/xml/method.xml). */
 object Layouts {
@@ -20,10 +20,12 @@ object Layouts {
                 'a' to "àáâäæãåā", 'e' to "èéêëēėę", 'i' to "îïíīįì", 'o' to "ôöòóœøōõ",
                 'u' to "ûüùúū", 'c' to "çćč", 'n' to "ñń", 's' to "ßśš", 'y' to "ÿý", 'z' to "žźż",
             ),
+            "en-US",
         ),
         Lang(
             "RU", "Русский", listOf("йцукенгшщзхъ", "фывапролджэ", "ячсмитьбю"),
             mapOf('е' to "ё"),
+            "ru-RU",
         ),
     )
 
@@ -35,14 +37,14 @@ object Layouts {
 
     private fun spacer(w: Float) = KeyDef("", KType.SPACER, w)
 
-    private fun bottom(first: KeyDef, lang: Lang) = listOf(
+    // language switching lives in the slider on the space bar, so no LANG key here
+    private fun bottom(first: KeyDef, @Suppress("UNUSED_PARAMETER") lang: Lang) = listOf(
         first,
-        KeyDef(",", KType.CHAR, 0.9f),
-        KeyDef("😊", KType.EMOJI, 0.9f),
-        KeyDef(" ", KType.SPACE, 3.3f),
-        KeyDef(".", KType.CHAR, 0.9f),
-        KeyDef(lang.code, KType.LANG, 0.9f),
-        KeyDef("↵", KType.ENTER, 1.3f),
+        KeyDef(",", KType.CHAR, 1f),
+        KeyDef("😊", KType.EMOJI, 1f),
+        KeyDef(" ", KType.SPACE, 4.3f),
+        KeyDef(".", KType.CHAR, 1f),
+        KeyDef("↵", KType.ENTER, 1.4f),
     )
 
     fun rows(page: Page, lang: Lang, numberRow: Boolean): List<List<KeyDef>> = when (page) {
